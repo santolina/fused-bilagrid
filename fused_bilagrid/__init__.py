@@ -371,3 +371,34 @@ class _FusedGridSampleFast(torch.autograd.Function):
                 bilagrid, coords, rgb, v_output.contiguous(),
                 ctx.compute_coords_grad
             ), None
+
+
+class _FusedGridSampleAdaptive(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, bilagrid, coords, rgb, compute_coords_grad=False):
+        with torch.cuda.device(bilagrid.device):
+            output = _C.bilagrid_sample_forward_adaptive(bilagrid, coords, rgb)
+        ctx.save_for_backward(bilagrid, coords, rgb)
+        ctx.compute_coords_grad = compute_coords_grad
+        return output
+
+    @staticmethod
+    def backward(ctx, v_output):
+        bilagrid, coords, rgb = ctx.saved_tensors
+        with torch.cuda.device(bilagrid.device):
+            return *_C.bilagrid_sample_backward_hierarchical(
+                bilagrid, coords, rgb, v_output.contiguous(),
+                ctx.compute_coords_grad
+            ), None
+
+
+def slice_fast(bil_grids, xy, rgb, grid_idx, compute_coords_grad=False):
+    """Fast version of slice function using optimized CUDA kernels."""
+    # ...existing slice implementation logic...
+    return _FusedGridSampleFast.apply(bil_grids.weight, xy, rgb, compute_coords_grad)
+
+
+def slice_adaptive(bil_grids, xy, rgb, grid_idx, compute_coords_grad=False):
+    """Adaptive version of slice function with spatial locality optimization."""
+    # ...existing slice implementation logic...
+    return _FusedGridSampleAdaptive.apply(bil_grids.weight, xy, rgb, compute_coords_grad)

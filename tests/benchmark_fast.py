@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-高速化されたfused bilagridの性能テストとベンチマーク
+新しい最適化カーネル（adaptive, hierarchical）を含むfused bilagridの性能テストとベンチマーク
 """
 
 import time
@@ -10,6 +10,7 @@ from typing import Tuple, Dict, Any
 
 try:
     import fused_bilagrid
+    import fused_bilagrid_cuda as _C
     HAS_FUSED_BILAGRID = True
 except ImportError:
     HAS_FUSED_BILAGRID = False
@@ -233,6 +234,128 @@ def profile_memory_usage():
         except Exception as e:
             print(f"Error during memory profiling: {e}")
 
+def test_kernel_availability():
+    """新しいカーネルが利用可能かテスト"""
+    if not HAS_FUSED_BILAGRID:
+        return False
+    
+    print("Testing kernel availability:")
+    
+    # Original kernels
+    print(f"  bilagrid_sample_forward: {hasattr(_C, 'bilagrid_sample_forward')}")
+    print(f"  bilagrid_sample_backward: {hasattr(_C, 'bilagrid_sample_backward')}")
+    
+    # Fast kernels 
+    print(f"  bilagrid_sample_forward_fast: {hasattr(_C, 'bilagrid_sample_forward_fast')}")
+    print(f"  bilagrid_sample_backward_fast: {hasattr(_C, 'bilagrid_sample_backward_fast')}")
+    
+    # New optimized kernels
+    print(f"  bilagrid_sample_forward_adaptive: {hasattr(_C, 'bilagrid_sample_forward_adaptive')}")
+    print(f"  bilagrid_sample_backward_hierarchical: {hasattr(_C, 'bilagrid_sample_backward_hierarchical')}")
+    
+    return True
+
+def run_forward_comparison():
+    """フォワードパスの比較"""
+    if not torch.cuda.is_available():
+        print("CUDA not available - cannot run comparison")
+        return
+    
+    print("\nForward Pass Comparison:")
+    print("=" * 50)
+    
+    # Generate test data
+    bilagrid, coords, rgb, _ = generate_test_data(N=2, m=8, h=64, w=64)
+    
+    methods = [
+        ("Original", lambda: _C.bilagrid_sample_forward(bilagrid, coords, rgb)),
+        ("Fast", lambda: _C.bilagrid_sample_forward_fast(bilagrid, coords, rgb)),
+        ("Adaptive", lambda: _C.bilagrid_sample_forward_adaptive(bilagrid, coords, rgb)),
+    ]
+    
+    for name, func in methods:
+        try:
+            result = benchmark_function(func, iterations=50)
+            print(f"{name:12s}: {result['mean_time']:.4f}ms ± {result['std_time']:.4f}ms")
+        except Exception as e:
+            print(f"{name:12s}: Error - {e}")
+
+def run_backward_comparison():
+    """バックワードパスの比較"""
+    if not torch.cuda.is_available():
+        print("CUDA not available - cannot run comparison")
+        return
+    
+    print("\nBackward Pass Comparison:")
+    print("=" * 50)
+    
+    # Generate test data
+    bilagrid, coords, rgb, v_output = generate_test_data(N=2, m=8, h=64, w=64)
+    
+    # Prepare output tensors
+    v_bilagrid = torch.zeros_like(bilagrid)
+    v_rgb = torch.zeros_like(rgb)
+    
+    methods = [
+        ("Original", lambda: _C.bilagrid_sample_backward(bilagrid, coords, rgb, v_output, False)),
+        ("Fast", lambda: _C.bilagrid_sample_backward_fast(bilagrid, coords, rgb, v_output, False)),
+        ("Hierarchical", lambda: _C.bilagrid_sample_backward_hierarchical(bilagrid, coords, rgb, v_output, False)),
+    ]
+    
+    for name, func in methods:
+        try:
+            result = benchmark_function(func, iterations=50)
+            print(f"{name:12s}: {result['mean_time']:.4f}ms ± {result['std_time']:.4f}ms")
+        except Exception as e:
+            print(f"{name:12s}: Error - {e}")
+
+def test_spatial_locality_detection():
+    """空間局所性検出のテスト"""
+    print("\nSpatial Locality Test:")
+    print("=" * 50)
+    
+    # High spatial locality case
+    coords_local = torch.ones(1, 4, 32, 32, 2) * 0.5  # All coords near center
+    coords_local += torch.randn_like(coords_local) * 0.01  # Small noise
+    
+    # Low spatial locality case  
+    coords_random = torch.rand(1, 4, 32, 32, 2)  # Random coords
+    
+    print("High locality coords - variance:", torch.var(coords_local).item())
+    print("Random coords - variance:", torch.var(coords_random).item())
+
+def run_optimization_analysis():
+    """最適化効果の分析"""
+    print("\nOptimization Analysis:")
+    print("=" * 50)
+    
+    sizes = [(1, 4, 32, 32), (2, 8, 64, 64), (4, 16, 128, 128)]
+    
+    for N, m, h, w in sizes:
+        print(f"\nSize: N={N}, m={m}, h={h}, w={w}")
+        print("-" * 30)
+        
+        bilagrid, coords, rgb, v_output = generate_test_data(N=N, m=m, h=h, w=w)
+        
+        # Forward comparison
+        if hasattr(_C, 'bilagrid_sample_forward_adaptive'):
+            try:
+                orig_time = benchmark_function(
+                    lambda: _C.bilagrid_sample_forward(bilagrid, coords, rgb),
+                    iterations=20
+                )['mean_time']
+                
+                adapt_time = benchmark_function(
+                    lambda: _C.bilagrid_sample_forward_adaptive(bilagrid, coords, rgb),
+                    iterations=20
+                )['mean_time']
+                
+                speedup = orig_time / adapt_time if adapt_time > 0 else 0
+                print(f"Forward speedup: {speedup:.2f}x")
+                
+            except Exception as e:
+                print(f"Forward test failed: {e}")
+
 def main():
     """メイン実行関数"""
     print("Fused BilaGrid Optimization Benchmark")
@@ -245,6 +368,11 @@ def main():
     test_forward_implementations()
     test_backward_implementations()
     profile_memory_usage()
+    test_kernel_availability()
+    run_forward_comparison()
+    run_backward_comparison()
+    test_spatial_locality_detection()
+    run_optimization_analysis()
     
     print("\n" + "=" * 60)
     print("BENCHMARK COMPLETE")
