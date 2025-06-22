@@ -311,3 +311,63 @@ class BilateralGrid(nn.Module):
             rgb = rgb.squeeze(1)
 
         return rgb
+
+    def forward_fast(self, grid_xy, rgb, idx=None, compute_coords_grad=False):
+        """Fast optimized version of forward method using hierarchical reduction."""
+        input_ndims = rgb.ndim
+        for _ in range(5 - input_ndims):
+            rgb = rgb.unsqueeze(1)
+
+        if grid_xy is None:
+            # Uniform grid - use original implementation for now
+            args = choose_uniform_sample_backward_args(*map(int, rgb.shape[-3:-1]), *map(int, grids.shape[-3:]))
+            rgb = _FusedUniformGridSample.apply(grids.float().contiguous(), rgb.float().contiguous(), args)
+        else:
+            if input_ndims <= 4:
+                assert idx is not None
+            elif input_ndims != 5:
+                raise ValueError("Bilateral grid slicing only takes either 2D, 3D, 4D and 5D inputs")
+
+            grids = self.grids
+            if idx is not None:
+                grids = grids[idx]
+
+            rgb = fused_bilagrid_sample_fast(grids, grid_xy, rgb, compute_coords_grad)
+
+        for _ in range(5 - input_ndims):
+            rgb = rgb.squeeze(1)
+
+        return rgb
+
+
+def fused_bilagrid_sample_fast(bilagrid, grid_xy, rgb, compute_coords_grad=False):
+    """Fast optimized version of fused_bilagrid_sample for non-uniform sampling."""
+    return _FusedGridSampleFast.apply(bilagrid, grid_xy, rgb, compute_coords_grad)
+
+
+def slice_fast(bilagrid, grid_xy, rgb, idx=None, compute_coords_grad=False):
+    """Fast optimized version of slice function."""
+    if isinstance(bilagrid, BilateralGrid):
+        return bilagrid.forward_fast(grid_xy, rgb, idx, compute_coords_grad)
+    else:
+        # Direct tensor usage
+        return fused_bilagrid_sample_fast(bilagrid, grid_xy, rgb, compute_coords_grad)
+
+
+class _FusedGridSampleFast(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, bilagrid, coords, rgb, compute_coords_grad=False):
+        with torch.cuda.device(bilagrid.device):
+            output = _C.bilagrid_sample_forward_fast(bilagrid, coords, rgb)
+        ctx.save_for_backward(bilagrid, coords, rgb)
+        ctx.compute_coords_grad = compute_coords_grad
+        return output
+
+    @staticmethod
+    def backward(ctx, v_output):
+        bilagrid, coords, rgb = ctx.saved_tensors
+        with torch.cuda.device(bilagrid.device):
+            return *_C.bilagrid_sample_backward_fast(
+                bilagrid, coords, rgb, v_output.contiguous(),
+                ctx.compute_coords_grad
+            ), None
